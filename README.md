@@ -1,8 +1,6 @@
 # project-management-delivery-operations-learning-journey
 My learning journey through project management, delivery, operations, planning, execution, and continuous improvement.
 
-# Project Management, Delivery & Operations Learning Journey
-
 This repository documents my journey of learning **Project Management, Project Delivery, and Operations**, from planning and execution to stakeholder management, risk, performance, and continuous improvement.
 
 ## 🎯 Goal
