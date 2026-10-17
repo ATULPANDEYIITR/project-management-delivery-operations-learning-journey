@@ -1,415 +1,390 @@
-"use strict";
+#include <algorithm>
+#include <iomanip>
+#include <iostream>
+#include <map>
+#include <optional>
+#include <set>
+#include <stdexcept>
+#include <string>
+#include <vector>
 
-/*
- * Project resource planning model.
- *
- * The implementation focuses on resource allocation, capacity, skills,
- * cost, scheduling conflicts, and policy-driven merge-style approval of
- * resource changes. JavaScript's event-driven model is used to emit
- * allocation events so an application can update dashboards or audit logs.
- */
+using namespace std;
 
-const ResourceType = Object.freeze({
-    PERSON: "person",
-    EQUIPMENT: "equipment",
-    SOFTWARE: "software",
-});
+enum class ResourceType {
+    Person,
+    Equipment,
+    Budget
+};
 
-const AllocationState = Object.freeze({
-    PLANNED: "planned",
-    ACTIVE: "active",
-    RELEASED: "released",
-});
+enum class ReviewState {
+    NotReviewed,
+    Approved,
+    Rejected
+};
 
-class ResourcePlanningError extends Error {
-    constructor(message) {
-        super(message);
-        this.name = "ResourcePlanningError";
-    }
-}
+struct Resource {
+    string id;
+    string name;
+    ResourceType type;
+    double weeklyCapacity;
+    double hourlyCost;
+    set<string> skills;
+};
 
-class Person {
-    constructor({
-        id,
-        name,
-        role,
-        skills,
-        weeklyCapacity,
-        hourlyCost,
-        availability = 1,
-    }) {
-        if (!id || !name || weeklyCapacity <= 0 || hourlyCost < 0) {
-            throw new ResourcePlanningError("Invalid person definition.");
+struct Task {
+    string id;
+    string name;
+    double estimatedHours;
+    int priority;
+    set<string> requiredSkills;
+};
+
+struct Allocation {
+    string resourceId;
+    string taskId;
+    double hours;
+};
+
+struct CapacityResult {
+    bool valid;
+    string reason;
+};
+
+class ResourceGovernanceEngine {
+private:
+    map<string, Resource> resources;
+    map<string, Task> tasks;
+    vector<Allocation> allocations;
+
+    double allocatedHours(const string& resourceId) const {
+        double total = 0.0;
+
+        for (const auto& allocation : allocations) {
+            if (allocation.resourceId == resourceId) {
+                total += allocation.hours;
+            }
         }
 
-        this.id = id;
-        this.name = name;
-        this.role = role;
-        this.skills = new Set(skills);
-        this.weeklyCapacity = weeklyCapacity;
-        this.hourlyCost = hourlyCost;
-        this.availability = availability;
+        return total;
     }
 
-    canPerform(requiredSkills, minimumLevel, level) {
-        return (
-            requiredSkills.every((skill) => this.skills.has(skill)) &&
-            level >= minimumLevel
-        );
-    }
-}
-
-class ProjectTask {
-    constructor({
-        id,
-        name,
-        requiredSkills,
-        minimumSkillLevel,
-        estimatedHours,
-        start,
-        end,
-    }) {
-        const startDate = new Date(start);
-        const endDate = new Date(end);
-
-        if (
-            !id ||
-            estimatedHours <= 0 ||
-            Number.isNaN(startDate.valueOf()) ||
-            Number.isNaN(endDate.valueOf()) ||
-            startDate > endDate
-        ) {
-            throw new ResourcePlanningError(`Invalid task: ${name}`);
+    bool hasRequiredSkills(
+        const Resource& resource,
+        const Task& task
+    ) const {
+        for (const auto& skill : task.requiredSkills) {
+            if (!resource.skills.contains(skill)) {
+                return false;
+            }
         }
 
-        this.id = id;
-        this.name = name;
-        this.requiredSkills = requiredSkills;
-        this.minimumSkillLevel = minimumSkillLevel;
-        this.estimatedHours = estimatedHours;
-        this.start = startDate;
-        this.end = endDate;
-    }
-}
-
-class ResourcePlanner extends EventTarget {
-    constructor({ projectName, budget }) {
-        super();
-
-        if (!projectName || budget <= 0) {
-            throw new ResourcePlanningError("Invalid project plan.");
-        }
-
-        this.projectName = projectName;
-        this.budget = budget;
-        this.people = new Map();
-        this.tasks = new Map();
-        this.allocations = [];
+        return true;
     }
 
-    addPerson(person) {
-        if (this.people.has(person.id)) {
-            throw new ResourcePlanningError(
-                `Duplicate resource ID: ${person.id}`
+public:
+    void addResource(const Resource& resource) {
+        if (resources.contains(resource.id)) {
+            throw runtime_error(
+                "Duplicate resource: " + resource.id
             );
         }
 
-        this.people.set(person.id, person);
-    }
-
-    addTask(task) {
-        if (this.tasks.has(task.id)) {
-            throw new ResourcePlanningError(
-                `Duplicate task ID: ${task.id}`
+        if (resource.weeklyCapacity <= 0) {
+            throw runtime_error(
+                "Resource capacity must be positive."
             );
         }
 
-        this.tasks.set(task.id, task);
+        resources.emplace(resource.id, resource);
     }
 
-    overlappingAllocations(resourceId, start, end) {
-        return this.allocations.filter((allocation) => {
-            if (allocation.resourceId !== resourceId) return false;
-            if (allocation.state === AllocationState.RELEASED) return false;
-
-            return (
-                allocation.start <= end &&
-                allocation.end >= start
+    void addTask(const Task& task) {
+        if (tasks.contains(task.id)) {
+            throw runtime_error(
+                "Duplicate task: " + task.id
             );
+        }
+
+        if (task.estimatedHours <= 0) {
+            throw runtime_error(
+                "Task effort must be positive."
+            );
+        }
+
+        tasks.emplace(task.id, task);
+    }
+
+    CapacityResult validateAllocation(
+        const string& resourceId,
+        const string& taskId,
+        double hours
+    ) const {
+        auto resourceIt = resources.find(resourceId);
+        auto taskIt = tasks.find(taskId);
+
+        if (resourceIt == resources.end()) {
+            return {false, "Resource does not exist."};
+        }
+
+        if (taskIt == tasks.end()) {
+            return {false, "Task does not exist."};
+        }
+
+        if (hours <= 0) {
+            return {false, "Allocation must be positive."};
+        }
+
+        const Resource& resource = resourceIt->second;
+        const Task& task = taskIt->second;
+
+        if (resource.type != ResourceType::Person) {
+            return {false, "This scenario requires a person resource."};
+        }
+
+        if (!hasRequiredSkills(resource, task)) {
+            return {
+                false,
+                "Resource does not possess all required skills."
+            };
+        }
+
+        if (hours > task.estimatedHours) {
+            return {
+                false,
+                "Allocation exceeds task effort."
+            };
+        }
+
+        const double current = allocatedHours(resourceId);
+
+        if (current + hours > resource.weeklyCapacity) {
+            return {
+                false,
+                "Allocation exceeds available weekly capacity."
+            };
+        }
+
+        return {true, "Allocation is valid."};
+    }
+
+    void allocate(
+        const string& resourceId,
+        const string& taskId,
+        double hours
+    ) {
+        CapacityResult result =
+            validateAllocation(resourceId, taskId, hours);
+
+        if (!result.valid) {
+            throw runtime_error(result.reason);
+        }
+
+        allocations.push_back({
+            resourceId,
+            taskId,
+            hours
         });
     }
 
-    allocatedHours(resourceId, start, end) {
-        return this.overlappingAllocations(resourceId, start, end)
-            .reduce((total, allocation) => total + allocation.hours, 0);
-    }
+    vector<Resource> findQualifiedResources(
+        const string& taskId
+    ) const {
+        auto taskIt = tasks.find(taskId);
 
-    findQualifiedPeople(task) {
-        return [...this.people.values()]
-            .filter((person) =>
-                person.canPerform(
-                    task.requiredSkills,
-                    task.minimumSkillLevel,
-                    this.skillLevelFor(person)
-                )
-            )
-            .sort((a, b) => a.hourlyCost - b.hourlyCost);
-    }
-
-    skillLevelFor(person) {
-        if (person.role.toLowerCase().includes("senior")) return 3;
-        if (person.role.toLowerCase().includes("lead")) return 4;
-        return 2;
-    }
-
-    allocatePerson(taskId, personId, hours) {
-        const task = this.tasks.get(taskId);
-        const person = this.people.get(personId);
-
-        if (!task || !person) {
-            throw new ResourcePlanningError(
-                "Task or resource does not exist."
-            );
+        if (taskIt == tasks.end()) {
+            throw runtime_error("Unknown task.");
         }
 
-        if (hours <= 0 || hours > task.estimatedHours) {
-            throw new ResourcePlanningError(
-                "Allocation must be positive and cannot exceed task effort."
-            );
-        }
+        vector<Resource> result;
 
-        if (
-            !person.canPerform(
-                task.requiredSkills,
-                task.minimumSkillLevel,
-                this.skillLevelFor(person)
-            )
-        ) {
-            throw new ResourcePlanningError(
-                `${person.name} does not satisfy the task skill requirements.`
-            );
-        }
-
-        const existing = this.allocatedHours(
-            person.id,
-            task.start,
-            task.end
-        );
-
-        const workingDays = this.workingDays(task.start, task.end);
-        const weeklyEquivalent =
-            hours / Math.max(workingDays / 5, 1);
-
-        if (existing + weeklyEquivalent > person.weeklyCapacity) {
-            throw new ResourcePlanningError(
-                `Capacity conflict for ${person.name}.`
-            );
-        }
-
-        const allocation = {
-            resourceId: person.id,
-            taskId: task.id,
-            type: ResourceType.PERSON,
-            start: task.start,
-            end: task.end,
-            hours,
-            state: AllocationState.PLANNED,
-        };
-
-        this.allocations.push(allocation);
-
-        this.dispatchEvent(
-            new CustomEvent("resourceAllocated", {
-                detail: allocation,
-            })
-        );
-
-        return allocation;
-    }
-
-    workingDays(start, end) {
-        let count = 0;
-        const current = new Date(start);
-
-        while (current <= end) {
-            const day = current.getDay();
-            if (day !== 0 && day !== 6) count++;
-            current.setDate(current.getDate() + 1);
-        }
-
-        return count;
-    }
-
-    estimateCost() {
-        return this.allocations.reduce((total, allocation) => {
-            if (allocation.type !== ResourceType.PERSON) {
-                return total;
+        for (const auto& [id, resource] : resources) {
+            if (
+                resource.type == ResourceType::Person &&
+                hasRequiredSkills(resource, taskIt->second)
+            ) {
+                result.push_back(resource);
             }
-
-            const person = this.people.get(allocation.resourceId);
-            return total + allocation.hours * person.hourlyCost;
-        }, 0);
-    }
-
-    utilization(personId) {
-        const person = this.people.get(personId);
-
-        if (!person) {
-            throw new ResourcePlanningError(
-                `Unknown resource: ${personId}`
-            );
         }
 
-        const hours = this.allocations
-            .filter(
-                (allocation) =>
-                    allocation.resourceId === personId &&
-                    allocation.state !== AllocationState.RELEASED
-            )
-            .reduce((total, allocation) => total + allocation.hours, 0);
+        sort(
+            result.begin(),
+            result.end(),
+            [this](const Resource& left, const Resource& right) {
+                const double leftRemaining =
+                    left.weeklyCapacity - allocatedHours(left.id);
 
-        return {
-            person: person.name,
-            hours,
-            capacity: person.weeklyCapacity,
-            percentage: (hours / person.weeklyCapacity) * 100,
-        };
+                const double rightRemaining =
+                    right.weeklyCapacity - allocatedHours(right.id);
+
+                return leftRemaining > rightRemaining;
+            }
+        );
+
+        return result;
     }
 
-    budgetStatus() {
-        const cost = this.estimateCost();
+    double totalCost() const {
+        double total = 0.0;
 
-        return {
-            budget: this.budget,
-            plannedCost: cost,
-            remaining: this.budget - cost,
-            overBudget: cost > this.budget,
-        };
+        for (const auto& allocation : allocations) {
+            const auto resourceIt =
+                resources.find(allocation.resourceId);
+
+            total +=
+                allocation.hours *
+                resourceIt->second.hourlyCost;
+        }
+
+        return total;
     }
 
-    generateDashboard() {
-        return {
-            project: this.projectName,
-            budget: this.budgetStatus(),
-            resources: [...this.people.keys()].map((id) =>
-                this.utilization(id)
-            ),
-            allocations: this.allocations.map((allocation) => ({
-                ...allocation,
-                start: allocation.start.toISOString().slice(0, 10),
-                end: allocation.end.toISOString().slice(0, 10),
-            })),
-        };
+    void printCapacityReport() const {
+        cout << "\nCapacity report\n";
+        cout << "------------------------------\n";
+
+        for (const auto& [id, resource] : resources) {
+            const double used = allocatedHours(id);
+            const double percentage =
+                used / resource.weeklyCapacity * 100.0;
+
+            cout << left
+                 << setw(12) << id
+                 << setw(22) << resource.name
+                 << right
+                 << setw(8) << fixed
+                 << setprecision(1) << used
+                 << " / "
+                 << setw(6) << resource.weeklyCapacity
+                 << " h   "
+                 << setw(6) << percentage
+                 << "%\n";
+        }
     }
-}
 
-function createPlan() {
-    const planner = new ResourcePlanner({
-        projectName: "Public Service Data Platform",
-        budget: 100000,
-    });
+    void printAllocationRegister() const {
+        cout << "\nAllocation register\n";
+        cout << "------------------------------\n";
 
-    planner.addPerson(
-        new Person({
-            id: "P-100",
-            name: "Asha Rao",
-            role: "Senior Backend Engineer",
-            skills: ["python", "api", "postgresql", "security"],
-            weeklyCapacity: 40,
-            hourlyCost: 75,
-        })
-    );
+        for (const auto& allocation : allocations) {
+            cout << allocation.resourceId
+                 << " -> "
+                 << allocation.taskId
+                 << " : "
+                 << allocation.hours
+                 << " hours\n";
+        }
+    }
+};
 
-    planner.addPerson(
-        new Person({
-            id: "P-200",
-            name: "Vikram Singh",
-            role: "Senior Frontend Engineer",
-            skills: ["javascript", "react", "api"],
-            weeklyCapacity: 40,
-            hourlyCost: 68,
-        })
-    );
-
-    planner.addPerson(
-        new Person({
-            id: "P-300",
-            name: "Meera Shah",
-            role: "Lead Security Engineer",
-            skills: ["security", "testing", "cloud"],
-            weeklyCapacity: 32,
-            hourlyCost: 92,
-        })
-    );
-
-    planner.addTask(
-        new ProjectTask({
-            id: "T-API",
-            name: "Secure service layer",
-            requiredSkills: ["python", "api", "security"],
-            minimumSkillLevel: 3,
-            estimatedHours: 72,
-            start: "2026-10-19",
-            end: "2026-10-30",
-        })
-    );
-
-    planner.addTask(
-        new ProjectTask({
-            id: "T-WEB",
-            name: "Citizen portal",
-            requiredSkills: ["javascript", "react"],
-            minimumSkillLevel: 3,
-            estimatedHours: 64,
-            start: "2026-10-26",
-            end: "2026-11-06",
-        })
-    );
-
-    planner.addTask(
-        new ProjectTask({
-            id: "T-SEC",
-            name: "Security validation",
-            requiredSkills: ["security", "testing"],
-            minimumSkillLevel: 4,
-            estimatedHours: 40,
-            start: "2026-11-02",
-            end: "2026-11-13",
-        })
-    );
-
-    return planner;
-}
-
-function run() {
-    const planner = createPlan();
+int main() {
+    ResourceGovernanceEngine planner;
 
     /*
-     * EventTarget gives the planner an event-driven boundary.
-     * A browser dashboard, Node.js service, or audit component can listen
-     * without being coupled to the allocation implementation.
+     * The case study represents a public-sector digital-service project.
+     * The planning engine separates task requirements from resources,
+     * allowing assignment decisions to be validated rather than made
+     * solely by project-manager intuition.
      */
-    planner.addEventListener("resourceAllocated", (event) => {
-        console.log(
-            `Allocation created: ${event.detail.resourceId} -> ` +
-            `${event.detail.taskId} (${event.detail.hours}h)`
-        );
+    planner.addResource({
+        "R-101",
+        "Asha Rao",
+        ResourceType::Person,
+        40.0,
+        75.0,
+        {"backend", "api", "security", "postgresql"}
     });
 
-    planner.allocatePerson("T-API", "P-100", 72);
-    planner.allocatePerson("T-WEB", "P-200", 64);
-    planner.allocatePerson("T-SEC", "P-300", 40);
+    planner.addResource({
+        "R-102",
+        "Vikram Singh",
+        ResourceType::Person,
+        40.0,
+        68.0,
+        {"frontend", "javascript", "accessibility"}
+    });
 
-    try {
-        planner.allocatePerson("T-SEC", "P-100", 40);
-    } catch (error) {
-        console.log(`Rejected allocation: ${error.message}`);
+    planner.addResource({
+        "R-103",
+        "Meera Shah",
+        ResourceType::Person,
+        32.0,
+        92.0,
+        {"security", "testing", "cloud"}
+    });
+
+    planner.addResource({
+        "R-104",
+        "Load Testing Cluster",
+        ResourceType::Equipment,
+        80.0,
+        25.0,
+        {}
+    });
+
+    planner.addTask({
+        "T-API",
+        "Secure citizen-service API",
+        72.0,
+        1,
+        {"backend", "api", "security"}
+    });
+
+    planner.addTask({
+        "T-WEB",
+        "Accessible service portal",
+        64.0,
+        2,
+        {"frontend", "javascript", "accessibility"}
+    });
+
+    planner.addTask({
+        "T-SEC",
+        "Security and resilience validation",
+        40.0,
+        1,
+        {"security", "testing"}
+    });
+
+    cout << "Qualified resources for T-SEC:\n";
+
+    for (const auto& resource :
+         planner.findQualifiedResources("T-SEC")) {
+        cout << "  " << resource.name
+             << " at $" << resource.hourlyCost
+             << "/hour\n";
     }
 
-    console.log("\nResource planning dashboard:");
-    console.log(
-        JSON.stringify(planner.generateDashboard(), null, 2)
-    );
-}
+    planner.allocate("R-101", "T-API", 72.0);
+    planner.allocate("R-102", "T-WEB", 64.0);
+    planner.allocate("R-103", "T-SEC", 40.0);
 
-run();
+    try {
+        /*
+         * This request is deliberately rejected because R-101 has already
+         * consumed its planned weekly capacity. Capacity enforcement is
+         * performed before the allocation enters the system.
+         */
+        planner.allocate("R-101", "T-SEC", 20.0);
+    } catch (const exception& error) {
+        cout << "\nRejected allocation: "
+             << error.what()
+             << '\n';
+    }
+
+    planner.printAllocationRegister();
+    planner.printCapacityReport();
+
+    cout << "\nPlanned personnel cost: $"
+         << fixed
+         << setprecision(2)
+         << planner.totalCost()
+         << '\n';
+
+    /*
+     * The model intentionally keeps resource qualification, capacity
+     * validation, allocation, and cost calculation separate. This makes
+     * policy changes easier to test and prevents a cost report from silently
+     * bypassing allocation constraints.
+     */
+    return 0;
+}
