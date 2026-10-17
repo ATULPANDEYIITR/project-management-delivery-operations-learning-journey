@@ -1,390 +1,496 @@
-#include <algorithm>
-#include <iomanip>
-#include <iostream>
-#include <map>
-#include <optional>
-#include <set>
-#include <stdexcept>
-#include <string>
-#include <vector>
+import java.util.ArrayList;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
-using namespace std;
+public class ResourcePlanningEnterprise {
 
-enum class ResourceType {
-    Person,
-    Equipment,
-    Budget
-};
+    enum ResourceType {
+        PERSON,
+        EQUIPMENT,
+        SOFTWARE
+    }
 
-enum class ReviewState {
-    NotReviewed,
-    Approved,
-    Rejected
-};
+    enum SkillLevel {
+        JUNIOR(1),
+        MID(2),
+        SENIOR(3),
+        EXPERT(4);
 
-struct Resource {
-    string id;
-    string name;
-    ResourceType type;
-    double weeklyCapacity;
-    double hourlyCost;
-    set<string> skills;
-};
+        private final int rank;
 
-struct Task {
-    string id;
-    string name;
-    double estimatedHours;
-    int priority;
-    set<string> requiredSkills;
-};
+        SkillLevel(int rank) {
+            this.rank = rank;
+        }
 
-struct Allocation {
-    string resourceId;
-    string taskId;
-    double hours;
-};
+        public int rank() {
+            return rank;
+        }
+    }
 
-struct CapacityResult {
-    bool valid;
-    string reason;
-};
+    enum TaskState {
+        PLANNED,
+        ACTIVE,
+        BLOCKED,
+        COMPLETED
+    }
 
-class ResourceGovernanceEngine {
-private:
-    map<string, Resource> resources;
-    map<string, Task> tasks;
-    vector<Allocation> allocations;
-
-    double allocatedHours(const string& resourceId) const {
-        double total = 0.0;
-
-        for (const auto& allocation : allocations) {
-            if (allocation.resourceId == resourceId) {
-                total += allocation.hours;
+    record Resource(
+        String id,
+        String name,
+        ResourceType type,
+        Set<String> skills,
+        SkillLevel skillLevel,
+        double weeklyCapacity,
+        double hourlyCost
+    ) {
+        Resource {
+            if (id == null || id.isBlank()) {
+                throw new IllegalArgumentException("Resource ID is required.");
             }
-        }
-
-        return total;
-    }
-
-    bool hasRequiredSkills(
-        const Resource& resource,
-        const Task& task
-    ) const {
-        for (const auto& skill : task.requiredSkills) {
-            if (!resource.skills.contains(skill)) {
-                return false;
+            if (weeklyCapacity <= 0 || hourlyCost < 0) {
+                throw new IllegalArgumentException(
+                    "Resource capacity and cost are invalid."
+                );
             }
+
+            skills = Set.copyOf(skills);
         }
 
-        return true;
+        boolean canPerform(Task task) {
+            return skillLevel.rank() >= task.minimumSkillLevel().rank()
+                && skills.containsAll(task.requiredSkills());
+        }
     }
 
-public:
-    void addResource(const Resource& resource) {
-        if (resources.contains(resource.id)) {
-            throw runtime_error(
-                "Duplicate resource: " + resource.id
+    record Task(
+        String id,
+        String name,
+        Set<String> requiredSkills,
+        SkillLevel minimumSkillLevel,
+        double estimatedHours,
+        int priority,
+        TaskState state
+    ) {
+        Task {
+            if (id == null || id.isBlank()) {
+                throw new IllegalArgumentException("Task ID is required.");
+            }
+            if (estimatedHours <= 0) {
+                throw new IllegalArgumentException(
+                    "Estimated effort must be positive."
+                );
+            }
+
+            requiredSkills = Set.copyOf(requiredSkills);
+        }
+
+        Task activate() {
+            if (state != TaskState.PLANNED) {
+                throw new IllegalStateException(
+                    "Only planned tasks can become active."
+                );
+            }
+
+            return new Task(
+                id,
+                name,
+                requiredSkills,
+                minimumSkillLevel,
+                estimatedHours,
+                priority,
+                TaskState.ACTIVE
             );
         }
 
-        if (resource.weeklyCapacity <= 0) {
-            throw runtime_error(
-                "Resource capacity must be positive."
+        Task block() {
+            if (state == TaskState.COMPLETED) {
+                throw new IllegalStateException(
+                    "Completed tasks cannot be blocked."
+                );
+            }
+
+            return new Task(
+                id,
+                name,
+                requiredSkills,
+                minimumSkillLevel,
+                estimatedHours,
+                priority,
+                TaskState.BLOCKED
             );
         }
-
-        resources.emplace(resource.id, resource);
     }
 
-    void addTask(const Task& task) {
-        if (tasks.contains(task.id)) {
-            throw runtime_error(
-                "Duplicate task: " + task.id
-            );
-        }
-
-        if (task.estimatedHours <= 0) {
-            throw runtime_error(
-                "Task effort must be positive."
-            );
-        }
-
-        tasks.emplace(task.id, task);
-    }
-
-    CapacityResult validateAllocation(
-        const string& resourceId,
-        const string& taskId,
-        double hours
-    ) const {
-        auto resourceIt = resources.find(resourceId);
-        auto taskIt = tasks.find(taskId);
-
-        if (resourceIt == resources.end()) {
-            return {false, "Resource does not exist."};
-        }
-
-        if (taskIt == tasks.end()) {
-            return {false, "Task does not exist."};
-        }
-
-        if (hours <= 0) {
-            return {false, "Allocation must be positive."};
-        }
-
-        const Resource& resource = resourceIt->second;
-        const Task& task = taskIt->second;
-
-        if (resource.type != ResourceType::Person) {
-            return {false, "This scenario requires a person resource."};
-        }
-
-        if (!hasRequiredSkills(resource, task)) {
-            return {
-                false,
-                "Resource does not possess all required skills."
-            };
-        }
-
-        if (hours > task.estimatedHours) {
-            return {
-                false,
-                "Allocation exceeds task effort."
-            };
-        }
-
-        const double current = allocatedHours(resourceId);
-
-        if (current + hours > resource.weeklyCapacity) {
-            return {
-                false,
-                "Allocation exceeds available weekly capacity."
-            };
-        }
-
-        return {true, "Allocation is valid."};
-    }
-
-    void allocate(
-        const string& resourceId,
-        const string& taskId,
+    record Allocation(
+        String resourceId,
+        String taskId,
         double hours
     ) {
-        CapacityResult result =
-            validateAllocation(resourceId, taskId, hours);
-
-        if (!result.valid) {
-            throw runtime_error(result.reason);
+        Allocation {
+            if (hours <= 0) {
+                throw new IllegalArgumentException(
+                    "Allocation hours must be positive."
+                );
+            }
         }
-
-        allocations.push_back({
-            resourceId,
-            taskId,
-            hours
-        });
     }
 
-    vector<Resource> findQualifiedResources(
-        const string& taskId
-    ) const {
-        auto taskIt = tasks.find(taskId);
+    static final class ResourceAllocationException
+        extends RuntimeException {
 
-        if (taskIt == tasks.end()) {
-            throw runtime_error("Unknown task.");
+        ResourceAllocationException(String message) {
+            super(message);
+        }
+    }
+
+    static final class ResourcePlanService {
+        private final Map<String, Resource> resources = new HashMap<>();
+        private final Map<String, Task> tasks = new HashMap<>();
+        private final List<Allocation> allocations = new ArrayList<>();
+        private final double projectBudget;
+
+        ResourcePlanService(double projectBudget) {
+            if (projectBudget <= 0) {
+                throw new IllegalArgumentException(
+                    "Project budget must be positive."
+                );
+            }
+
+            this.projectBudget = projectBudget;
         }
 
-        vector<Resource> result;
-
-        for (const auto& [id, resource] : resources) {
-            if (
-                resource.type == ResourceType::Person &&
-                hasRequiredSkills(resource, taskIt->second)
-            ) {
-                result.push_back(resource);
+        void registerResource(Resource resource) {
+            if (resources.putIfAbsent(resource.id(), resource) != null) {
+                throw new IllegalArgumentException(
+                    "Resource already registered: " + resource.id()
+                );
             }
         }
 
-        sort(
-            result.begin(),
-            result.end(),
-            [this](const Resource& left, const Resource& right) {
-                const double leftRemaining =
-                    left.weeklyCapacity - allocatedHours(left.id);
-
-                const double rightRemaining =
-                    right.weeklyCapacity - allocatedHours(right.id);
-
-                return leftRemaining > rightRemaining;
+        void registerTask(Task task) {
+            if (tasks.putIfAbsent(task.id(), task) != null) {
+                throw new IllegalArgumentException(
+                    "Task already registered: " + task.id()
+                );
             }
+        }
+
+        List<Resource> findEligiblePeople(String taskId) {
+            Task task = requireTask(taskId);
+
+            return resources.values()
+                .stream()
+                .filter(resource ->
+                    resource.type() == ResourceType.PERSON
+                    && resource.canPerform(task)
+                )
+                .sorted(
+                    java.util.Comparator
+                        .comparingDouble(Resource::hourlyCost)
+                )
+                .toList();
+        }
+
+        void allocate(String taskId, String resourceId, double hours) {
+            Task task = requireTask(taskId);
+            Resource resource = requireResource(resourceId);
+
+            if (resource.type() != ResourceType.PERSON) {
+                throw new ResourceAllocationException(
+                    "This allocation workflow requires a person resource."
+                );
+            }
+
+            if (!resource.canPerform(task)) {
+                throw new ResourceAllocationException(
+                    resource.name()
+                    + " does not satisfy the task qualification policy."
+                );
+            }
+
+            double existingHours = allocatedHours(resourceId);
+
+            if (existingHours + hours > resource.weeklyCapacity()) {
+                throw new ResourceAllocationException(
+                    "Allocation exceeds available capacity for "
+                    + resource.name()
+                );
+            }
+
+            double taskRemaining =
+                task.estimatedHours() - allocatedTaskHours(taskId);
+
+            if (hours > taskRemaining) {
+                throw new ResourceAllocationException(
+                    "Allocation exceeds remaining task effort."
+                );
+            }
+
+            double projectedCost =
+                projectedCost(resource, hours);
+
+            if (currentCost() + projectedCost > projectBudget) {
+                throw new ResourceAllocationException(
+                    "Allocation would exceed the project budget."
+                );
+            }
+
+            allocations.add(
+                new Allocation(resourceId, taskId, hours)
+            );
+        }
+
+        double allocatedHours(String resourceId) {
+            return allocations.stream()
+                .filter(a -> a.resourceId().equals(resourceId))
+                .mapToDouble(Allocation::hours)
+                .sum();
+        }
+
+        double allocatedTaskHours(String taskId) {
+            return allocations.stream()
+                .filter(a -> a.taskId().equals(taskId))
+                .mapToDouble(Allocation::hours)
+                .sum();
+        }
+
+        double projectedCost(Resource resource, double hours) {
+            return resource.hourlyCost() * hours;
+        }
+
+        double currentCost() {
+            return allocations.stream()
+                .mapToDouble(allocation -> {
+                    Resource resource =
+                        resources.get(allocation.resourceId());
+
+                    return resource.hourlyCost()
+                        * allocation.hours();
+                })
+                .sum();
+        }
+
+        double remainingBudget() {
+            return projectBudget - currentCost();
+        }
+
+        void printResourceCapacity() {
+            System.out.println("\nResource capacity");
+
+            resources.values().stream()
+                .filter(r -> r.type() == ResourceType.PERSON)
+                .forEach(resource -> {
+                    double used = allocatedHours(resource.id());
+                    double percentage =
+                        used / resource.weeklyCapacity() * 100.0;
+
+                    System.out.printf(
+                        "%-18s %6.1f / %6.1f hours (%6.2f%%)%n",
+                        resource.name(),
+                        used,
+                        resource.weeklyCapacity(),
+                        percentage
+                    );
+                });
+        }
+
+        private Task requireTask(String id) {
+            Task task = tasks.get(id);
+
+            if (task == null) {
+                throw new IllegalArgumentException(
+                    "Unknown task: " + id
+                );
+            }
+
+            return task;
+        }
+
+        private Resource requireResource(String id) {
+            Resource resource = resources.get(id);
+
+            if (resource == null) {
+                throw new IllegalArgumentException(
+                    "Unknown resource: " + id
+                );
+            }
+
+            return resource;
+        }
+    }
+
+    public static void main(String[] args) {
+        ResourcePlanService service =
+            new ResourcePlanService(120_000.00);
+
+        service.registerResource(
+            new Resource(
+                "P-001",
+                "Asha Rao",
+                ResourceType.PERSON,
+                Set.of(
+                    "backend",
+                    "api",
+                    "security",
+                    "postgresql"
+                ),
+                SkillLevel.SENIOR,
+                40,
+                75
+            )
         );
 
-        return result;
-    }
+        service.registerResource(
+            new Resource(
+                "P-002",
+                "Vikram Singh",
+                ResourceType.PERSON,
+                Set.of(
+                    "frontend",
+                    "javascript",
+                    "accessibility"
+                ),
+                SkillLevel.SENIOR,
+                40,
+                68
+            )
+        );
 
-    double totalCost() const {
-        double total = 0.0;
+        service.registerResource(
+            new Resource(
+                "P-003",
+                "Meera Shah",
+                ResourceType.PERSON,
+                Set.of(
+                    "security",
+                    "testing",
+                    "cloud"
+                ),
+                SkillLevel.EXPERT,
+                32,
+                92
+            )
+        );
 
-        for (const auto& allocation : allocations) {
-            const auto resourceIt =
-                resources.find(allocation.resourceId);
+        service.registerResource(
+            new Resource(
+                "EQ-001",
+                "Performance Test Cluster",
+                ResourceType.EQUIPMENT,
+                Set.of(),
+                SkillLevel.EXPERT,
+                80,
+                25
+            )
+        );
 
-            total +=
-                allocation.hours *
-                resourceIt->second.hourlyCost;
+        service.registerTask(
+            new Task(
+                "T-001",
+                "Secure service implementation",
+                Set.of("backend", "api", "security"),
+                SkillLevel.SENIOR,
+                72,
+                1,
+                TaskState.PLANNED
+            )
+        );
+
+        service.registerTask(
+            new Task(
+                "T-002",
+                "Accessible public portal",
+                Set.of("frontend", "javascript", "accessibility"),
+                SkillLevel.SENIOR,
+                64,
+                2,
+                TaskState.PLANNED
+            )
+        );
+
+        service.registerTask(
+            new Task(
+                "T-003",
+                "Security validation",
+                Set.of("security", "testing"),
+                SkillLevel.EXPERT,
+                40,
+                1,
+                TaskState.PLANNED
+            )
+        );
+
+        System.out.println("Eligible resources for security validation:");
+
+        service.findEligiblePeople("T-003")
+            .forEach(resource ->
+                System.out.printf(
+                    "  %s, %s, $%.2f/hour%n",
+                    resource.name(),
+                    resource.skillLevel(),
+                    resource.hourlyCost()
+                )
+            );
+
+        service.allocate("T-001", "P-001", 72);
+        service.allocate("T-002", "P-002", 64);
+        service.allocate("T-003", "P-003", 40);
+
+        try {
+            /*
+             * The exception is raised before the invalid allocation is
+             * persisted. This keeps domain rules inside the service boundary
+             * instead of requiring callers to duplicate capacity checks.
+             */
+            service.allocate("T-003", "P-001", 20);
+        } catch (ResourceAllocationException exception) {
+            System.out.println(
+                "\nRejected allocation: "
+                + exception.getMessage()
+            );
         }
 
-        return total;
-    }
+        service.printResourceCapacity();
 
-    void printCapacityReport() const {
-        cout << "\nCapacity report\n";
-        cout << "------------------------------\n";
+        System.out.printf(
+            "%nPlanned cost: $%,.2f%n",
+            service.currentCost()
+        );
 
-        for (const auto& [id, resource] : resources) {
-            const double used = allocatedHours(id);
-            const double percentage =
-                used / resource.weeklyCapacity * 100.0;
+        System.out.printf(
+            "Remaining budget: $%,.2f%n",
+            service.remainingBudget()
+        );
 
-            cout << left
-                 << setw(12) << id
-                 << setw(22) << resource.name
-                 << right
-                 << setw(8) << fixed
-                 << setprecision(1) << used
-                 << " / "
-                 << setw(6) << resource.weeklyCapacity
-                 << " h   "
-                 << setw(6) << percentage
-                 << "%\n";
-        }
-    }
-
-    void printAllocationRegister() const {
-        cout << "\nAllocation register\n";
-        cout << "------------------------------\n";
-
-        for (const auto& allocation : allocations) {
-            cout << allocation.resourceId
-                 << " -> "
-                 << allocation.taskId
-                 << " : "
-                 << allocation.hours
-                 << " hours\n";
-        }
-    }
-};
-
-int main() {
-    ResourceGovernanceEngine planner;
-
-    /*
-     * The case study represents a public-sector digital-service project.
-     * The planning engine separates task requirements from resources,
-     * allowing assignment decisions to be validated rather than made
-     * solely by project-manager intuition.
-     */
-    planner.addResource({
-        "R-101",
-        "Asha Rao",
-        ResourceType::Person,
-        40.0,
-        75.0,
-        {"backend", "api", "security", "postgresql"}
-    });
-
-    planner.addResource({
-        "R-102",
-        "Vikram Singh",
-        ResourceType::Person,
-        40.0,
-        68.0,
-        {"frontend", "javascript", "accessibility"}
-    });
-
-    planner.addResource({
-        "R-103",
-        "Meera Shah",
-        ResourceType::Person,
-        32.0,
-        92.0,
-        {"security", "testing", "cloud"}
-    });
-
-    planner.addResource({
-        "R-104",
-        "Load Testing Cluster",
-        ResourceType::Equipment,
-        80.0,
-        25.0,
-        {}
-    });
-
-    planner.addTask({
-        "T-API",
-        "Secure citizen-service API",
-        72.0,
-        1,
-        {"backend", "api", "security"}
-    });
-
-    planner.addTask({
-        "T-WEB",
-        "Accessible service portal",
-        64.0,
-        2,
-        {"frontend", "javascript", "accessibility"}
-    });
-
-    planner.addTask({
-        "T-SEC",
-        "Security and resilience validation",
-        40.0,
-        1,
-        {"security", "testing"}
-    });
-
-    cout << "Qualified resources for T-SEC:\n";
-
-    for (const auto& resource :
-         planner.findQualifiedResources("T-SEC")) {
-        cout << "  " << resource.name
-             << " at $" << resource.hourlyCost
-             << "/hour\n";
-    }
-
-    planner.allocate("R-101", "T-API", 72.0);
-    planner.allocate("R-102", "T-WEB", 64.0);
-    planner.allocate("R-103", "T-SEC", 40.0);
-
-    try {
         /*
-         * This request is deliberately rejected because R-101 has already
-         * consumed its planned weekly capacity. Capacity enforcement is
-         * performed before the allocation enters the system.
+         * Java records provide immutable domain values for resources,
+         * tasks, and allocations. The service owns mutable workflow state,
+         * creating a clear separation between domain data and orchestration.
          */
-        planner.allocate("R-101", "T-SEC", 20.0);
-    } catch (const exception& error) {
-        cout << "\nRejected allocation: "
-             << error.what()
-             << '\n';
+        Task activeTask =
+            new Task(
+                "T-004",
+                "Operational monitoring",
+                Set.of("cloud"),
+                SkillLevel.MID,
+                24,
+                3,
+                TaskState.PLANNED
+            );
+
+        service.registerTask(activeTask);
+
+        Task activated = activeTask.activate();
+
+        System.out.println(
+            "\nState transition: "
+            + activeTask.state()
+            + " -> "
+            + activated.state()
+        );
     }
-
-    planner.printAllocationRegister();
-    planner.printCapacityReport();
-
-    cout << "\nPlanned personnel cost: $"
-         << fixed
-         << setprecision(2)
-         << planner.totalCost()
-         << '\n';
-
-    /*
-     * The model intentionally keeps resource qualification, capacity
-     * validation, allocation, and cost calculation separate. This makes
-     * policy changes easier to test and prevents a cost report from silently
-     * bypassing allocation constraints.
-     */
-    return 0;
 }
