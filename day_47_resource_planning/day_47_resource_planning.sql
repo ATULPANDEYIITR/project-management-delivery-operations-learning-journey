@@ -1,496 +1,587 @@
-import java.util.ArrayList;
-import java.util.EnumSet;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-
-public class ResourcePlanningEnterprise {
-
-    enum ResourceType {
-        PERSON,
-        EQUIPMENT,
-        SOFTWARE
-    }
-
-    enum SkillLevel {
-        JUNIOR(1),
-        MID(2),
-        SENIOR(3),
-        EXPERT(4);
-
-        private final int rank;
-
-        SkillLevel(int rank) {
-            this.rank = rank;
-        }
-
-        public int rank() {
-            return rank;
-        }
-    }
-
-    enum TaskState {
-        PLANNED,
-        ACTIVE,
-        BLOCKED,
-        COMPLETED
-    }
-
-    record Resource(
-        String id,
-        String name,
-        ResourceType type,
-        Set<String> skills,
-        SkillLevel skillLevel,
-        double weeklyCapacity,
-        double hourlyCost
-    ) {
-        Resource {
-            if (id == null || id.isBlank()) {
-                throw new IllegalArgumentException("Resource ID is required.");
-            }
-            if (weeklyCapacity <= 0 || hourlyCost < 0) {
-                throw new IllegalArgumentException(
-                    "Resource capacity and cost are invalid."
-                );
-            }
-
-            skills = Set.copyOf(skills);
-        }
-
-        boolean canPerform(Task task) {
-            return skillLevel.rank() >= task.minimumSkillLevel().rank()
-                && skills.containsAll(task.requiredSkills());
-        }
-    }
-
-    record Task(
-        String id,
-        String name,
-        Set<String> requiredSkills,
-        SkillLevel minimumSkillLevel,
-        double estimatedHours,
-        int priority,
-        TaskState state
-    ) {
-        Task {
-            if (id == null || id.isBlank()) {
-                throw new IllegalArgumentException("Task ID is required.");
-            }
-            if (estimatedHours <= 0) {
-                throw new IllegalArgumentException(
-                    "Estimated effort must be positive."
-                );
-            }
-
-            requiredSkills = Set.copyOf(requiredSkills);
-        }
-
-        Task activate() {
-            if (state != TaskState.PLANNED) {
-                throw new IllegalStateException(
-                    "Only planned tasks can become active."
-                );
-            }
-
-            return new Task(
-                id,
-                name,
-                requiredSkills,
-                minimumSkillLevel,
-                estimatedHours,
-                priority,
-                TaskState.ACTIVE
-            );
-        }
-
-        Task block() {
-            if (state == TaskState.COMPLETED) {
-                throw new IllegalStateException(
-                    "Completed tasks cannot be blocked."
-                );
-            }
-
-            return new Task(
-                id,
-                name,
-                requiredSkills,
-                minimumSkillLevel,
-                estimatedHours,
-                priority,
-                TaskState.BLOCKED
-            );
-        }
-    }
-
-    record Allocation(
-        String resourceId,
-        String taskId,
-        double hours
-    ) {
-        Allocation {
-            if (hours <= 0) {
-                throw new IllegalArgumentException(
-                    "Allocation hours must be positive."
-                );
-            }
-        }
-    }
-
-    static final class ResourceAllocationException
-        extends RuntimeException {
-
-        ResourceAllocationException(String message) {
-            super(message);
-        }
-    }
-
-    static final class ResourcePlanService {
-        private final Map<String, Resource> resources = new HashMap<>();
-        private final Map<String, Task> tasks = new HashMap<>();
-        private final List<Allocation> allocations = new ArrayList<>();
-        private final double projectBudget;
-
-        ResourcePlanService(double projectBudget) {
-            if (projectBudget <= 0) {
-                throw new IllegalArgumentException(
-                    "Project budget must be positive."
-                );
-            }
-
-            this.projectBudget = projectBudget;
-        }
-
-        void registerResource(Resource resource) {
-            if (resources.putIfAbsent(resource.id(), resource) != null) {
-                throw new IllegalArgumentException(
-                    "Resource already registered: " + resource.id()
-                );
-            }
-        }
-
-        void registerTask(Task task) {
-            if (tasks.putIfAbsent(task.id(), task) != null) {
-                throw new IllegalArgumentException(
-                    "Task already registered: " + task.id()
-                );
-            }
-        }
-
-        List<Resource> findEligiblePeople(String taskId) {
-            Task task = requireTask(taskId);
-
-            return resources.values()
-                .stream()
-                .filter(resource ->
-                    resource.type() == ResourceType.PERSON
-                    && resource.canPerform(task)
-                )
-                .sorted(
-                    java.util.Comparator
-                        .comparingDouble(Resource::hourlyCost)
-                )
-                .toList();
-        }
-
-        void allocate(String taskId, String resourceId, double hours) {
-            Task task = requireTask(taskId);
-            Resource resource = requireResource(resourceId);
-
-            if (resource.type() != ResourceType.PERSON) {
-                throw new ResourceAllocationException(
-                    "This allocation workflow requires a person resource."
-                );
-            }
-
-            if (!resource.canPerform(task)) {
-                throw new ResourceAllocationException(
-                    resource.name()
-                    + " does not satisfy the task qualification policy."
-                );
-            }
-
-            double existingHours = allocatedHours(resourceId);
-
-            if (existingHours + hours > resource.weeklyCapacity()) {
-                throw new ResourceAllocationException(
-                    "Allocation exceeds available capacity for "
-                    + resource.name()
-                );
-            }
-
-            double taskRemaining =
-                task.estimatedHours() - allocatedTaskHours(taskId);
-
-            if (hours > taskRemaining) {
-                throw new ResourceAllocationException(
-                    "Allocation exceeds remaining task effort."
-                );
-            }
-
-            double projectedCost =
-                projectedCost(resource, hours);
-
-            if (currentCost() + projectedCost > projectBudget) {
-                throw new ResourceAllocationException(
-                    "Allocation would exceed the project budget."
-                );
-            }
-
-            allocations.add(
-                new Allocation(resourceId, taskId, hours)
-            );
-        }
-
-        double allocatedHours(String resourceId) {
-            return allocations.stream()
-                .filter(a -> a.resourceId().equals(resourceId))
-                .mapToDouble(Allocation::hours)
-                .sum();
-        }
-
-        double allocatedTaskHours(String taskId) {
-            return allocations.stream()
-                .filter(a -> a.taskId().equals(taskId))
-                .mapToDouble(Allocation::hours)
-                .sum();
-        }
-
-        double projectedCost(Resource resource, double hours) {
-            return resource.hourlyCost() * hours;
-        }
-
-        double currentCost() {
-            return allocations.stream()
-                .mapToDouble(allocation -> {
-                    Resource resource =
-                        resources.get(allocation.resourceId());
-
-                    return resource.hourlyCost()
-                        * allocation.hours();
-                })
-                .sum();
-        }
-
-        double remainingBudget() {
-            return projectBudget - currentCost();
-        }
-
-        void printResourceCapacity() {
-            System.out.println("\nResource capacity");
-
-            resources.values().stream()
-                .filter(r -> r.type() == ResourceType.PERSON)
-                .forEach(resource -> {
-                    double used = allocatedHours(resource.id());
-                    double percentage =
-                        used / resource.weeklyCapacity() * 100.0;
-
-                    System.out.printf(
-                        "%-18s %6.1f / %6.1f hours (%6.2f%%)%n",
-                        resource.name(),
-                        used,
-                        resource.weeklyCapacity(),
-                        percentage
-                    );
-                });
-        }
-
-        private Task requireTask(String id) {
-            Task task = tasks.get(id);
-
-            if (task == null) {
-                throw new IllegalArgumentException(
-                    "Unknown task: " + id
-                );
-            }
-
-            return task;
-        }
-
-        private Resource requireResource(String id) {
-            Resource resource = resources.get(id);
-
-            if (resource == null) {
-                throw new IllegalArgumentException(
-                    "Unknown resource: " + id
-                );
-            }
-
-            return resource;
-        }
-    }
-
-    public static void main(String[] args) {
-        ResourcePlanService service =
-            new ResourcePlanService(120_000.00);
-
-        service.registerResource(
-            new Resource(
-                "P-001",
-                "Asha Rao",
-                ResourceType.PERSON,
-                Set.of(
-                    "backend",
-                    "api",
-                    "security",
-                    "postgresql"
-                ),
-                SkillLevel.SENIOR,
-                40,
-                75
-            )
-        );
-
-        service.registerResource(
-            new Resource(
-                "P-002",
-                "Vikram Singh",
-                ResourceType.PERSON,
-                Set.of(
-                    "frontend",
-                    "javascript",
-                    "accessibility"
-                ),
-                SkillLevel.SENIOR,
-                40,
-                68
-            )
-        );
-
-        service.registerResource(
-            new Resource(
-                "P-003",
-                "Meera Shah",
-                ResourceType.PERSON,
-                Set.of(
-                    "security",
-                    "testing",
-                    "cloud"
-                ),
-                SkillLevel.EXPERT,
-                32,
-                92
-            )
-        );
-
-        service.registerResource(
-            new Resource(
-                "EQ-001",
-                "Performance Test Cluster",
-                ResourceType.EQUIPMENT,
-                Set.of(),
-                SkillLevel.EXPERT,
-                80,
-                25
-            )
-        );
-
-        service.registerTask(
-            new Task(
-                "T-001",
-                "Secure service implementation",
-                Set.of("backend", "api", "security"),
-                SkillLevel.SENIOR,
-                72,
-                1,
-                TaskState.PLANNED
-            )
-        );
-
-        service.registerTask(
-            new Task(
-                "T-002",
-                "Accessible public portal",
-                Set.of("frontend", "javascript", "accessibility"),
-                SkillLevel.SENIOR,
-                64,
-                2,
-                TaskState.PLANNED
-            )
-        );
-
-        service.registerTask(
-            new Task(
-                "T-003",
-                "Security validation",
-                Set.of("security", "testing"),
-                SkillLevel.EXPERT,
-                40,
-                1,
-                TaskState.PLANNED
-            )
-        );
-
-        System.out.println("Eligible resources for security validation:");
-
-        service.findEligiblePeople("T-003")
-            .forEach(resource ->
-                System.out.printf(
-                    "  %s, %s, $%.2f/hour%n",
-                    resource.name(),
-                    resource.skillLevel(),
-                    resource.hourlyCost()
-                )
-            );
-
-        service.allocate("T-001", "P-001", 72);
-        service.allocate("T-002", "P-002", 64);
-        service.allocate("T-003", "P-003", 40);
-
-        try {
-            /*
-             * The exception is raised before the invalid allocation is
-             * persisted. This keeps domain rules inside the service boundary
-             * instead of requiring callers to duplicate capacity checks.
-             */
-            service.allocate("T-003", "P-001", 20);
-        } catch (ResourceAllocationException exception) {
-            System.out.println(
-                "\nRejected allocation: "
-                + exception.getMessage()
-            );
-        }
-
-        service.printResourceCapacity();
-
-        System.out.printf(
-            "%nPlanned cost: $%,.2f%n",
-            service.currentCost()
-        );
-
-        System.out.printf(
-            "Remaining budget: $%,.2f%n",
-            service.remainingBudget()
-        );
-
-        /*
-         * Java records provide immutable domain values for resources,
-         * tasks, and allocations. The service owns mutable workflow state,
-         * creating a clear separation between domain data and orchestration.
-         */
-        Task activeTask =
-            new Task(
-                "T-004",
-                "Operational monitoring",
-                Set.of("cloud"),
-                SkillLevel.MID,
-                24,
-                3,
-                TaskState.PLANNED
-            );
-
-        service.registerTask(activeTask);
-
-        Task activated = activeTask.activate();
-
-        System.out.println(
-            "\nState transition: "
-            + activeTask.state()
-            + " -> "
-            + activated.state()
-        );
-    }
-}
+DROP SCHEMA IF EXISTS resource_planning CASCADE;
+CREATE SCHEMA resource_planning;
+SET search_path TO resource_planning;
+
+-- Resource planning needs separate entities for resources, project work,
+-- allocations, schedules, and cost controls. Keeping them separate allows
+-- database constraints to prevent invalid resource assignments.
+
+CREATE TYPE resource_type AS ENUM (
+    'person',
+    'equipment',
+    'software'
+);
+
+CREATE TYPE task_state AS ENUM (
+    'planned',
+    'active',
+    'blocked',
+    'completed'
+);
+
+CREATE TYPE allocation_state AS ENUM (
+    'planned',
+    'active',
+    'released'
+);
+
+CREATE TABLE projects (
+    project_id BIGSERIAL PRIMARY KEY,
+    project_code VARCHAR(40) NOT NULL UNIQUE,
+    project_name VARCHAR(200) NOT NULL,
+    budget NUMERIC(14,2) NOT NULL CHECK (budget > 0),
+    start_date DATE NOT NULL,
+    end_date DATE NOT NULL,
+    CHECK (start_date <= end_date)
+);
+
+CREATE TABLE resources (
+    resource_id BIGSERIAL PRIMARY KEY,
+    resource_code VARCHAR(40) NOT NULL UNIQUE,
+    resource_name VARCHAR(160) NOT NULL,
+    resource_type resource_type NOT NULL,
+    weekly_capacity_hours NUMERIC(8,2) NOT NULL
+        CHECK (weekly_capacity_hours > 0),
+    hourly_cost NUMERIC(10,2) NOT NULL
+        CHECK (hourly_cost >= 0),
+    active BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+CREATE TABLE resource_skills (
+    resource_id BIGINT NOT NULL
+        REFERENCES resources(resource_id)
+        ON DELETE CASCADE,
+    skill_name VARCHAR(100) NOT NULL,
+    skill_level SMALLINT NOT NULL
+        CHECK (skill_level BETWEEN 1 AND 4),
+    PRIMARY KEY (resource_id, skill_name)
+);
+
+CREATE TABLE tasks (
+    task_id BIGSERIAL PRIMARY KEY,
+    project_id BIGINT NOT NULL
+        REFERENCES projects(project_id)
+        ON DELETE CASCADE,
+    task_code VARCHAR(40) NOT NULL,
+    task_name VARCHAR(200) NOT NULL,
+    state task_state NOT NULL DEFAULT 'planned',
+    estimated_hours NUMERIC(10,2) NOT NULL
+        CHECK (estimated_hours > 0),
+    priority SMALLINT NOT NULL
+        CHECK (priority > 0),
+    start_date DATE NOT NULL,
+    end_date DATE NOT NULL,
+    UNIQUE (project_id, task_code),
+    CHECK (start_date <= end_date)
+);
+
+CREATE TABLE task_required_skills (
+    task_id BIGINT NOT NULL
+        REFERENCES tasks(task_id)
+        ON DELETE CASCADE,
+    skill_name VARCHAR(100) NOT NULL,
+    minimum_skill_level SMALLINT NOT NULL
+        CHECK (minimum_skill_level BETWEEN 1 AND 4),
+    PRIMARY KEY (task_id, skill_name)
+);
+
+CREATE TABLE allocations (
+    allocation_id BIGSERIAL PRIMARY KEY,
+    task_id BIGINT NOT NULL
+        REFERENCES tasks(task_id)
+        ON DELETE CASCADE,
+    resource_id BIGINT NOT NULL
+        REFERENCES resources(resource_id),
+    allocation_start DATE NOT NULL,
+    allocation_end DATE NOT NULL,
+    allocated_hours NUMERIC(10,2) NOT NULL
+        CHECK (allocated_hours > 0),
+    state allocation_state NOT NULL DEFAULT 'planned',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (allocation_start <= allocation_end)
+);
+
+CREATE TABLE resource_absences (
+    absence_id BIGSERIAL PRIMARY KEY,
+    resource_id BIGINT NOT NULL
+        REFERENCES resources(resource_id)
+        ON DELETE CASCADE,
+    absence_start DATE NOT NULL,
+    absence_end DATE NOT NULL,
+    reason VARCHAR(200),
+    CHECK (absence_start <= absence_end)
+);
+
+CREATE INDEX idx_tasks_project_state
+    ON tasks(project_id, state);
+
+CREATE INDEX idx_allocations_resource_dates
+    ON allocations(resource_id, allocation_start, allocation_end);
+
+CREATE INDEX idx_allocations_task
+    ON allocations(task_id);
+
+CREATE INDEX idx_resource_skills_skill
+    ON resource_skills(skill_name, skill_level);
+
+CREATE INDEX idx_task_required_skills_skill
+    ON task_required_skills(skill_name, minimum_skill_level);
+
+INSERT INTO projects (
+    project_code,
+    project_name,
+    budget,
+    start_date,
+    end_date
+)
+VALUES (
+    'PSDP-2026',
+    'Public Service Data Platform',
+    120000.00,
+    '2026-10-19',
+    '2026-12-18'
+);
+
+INSERT INTO resources (
+    resource_code,
+    resource_name,
+    resource_type,
+    weekly_capacity_hours,
+    hourly_cost
+)
+VALUES
+    ('P-001', 'Asha Rao', 'person', 40, 75),
+    ('P-002', 'Vikram Singh', 'person', 40, 68),
+    ('P-003', 'Meera Shah', 'person', 32, 92),
+    ('EQ-001', 'Performance Test Cluster', 'equipment', 80, 25);
+
+INSERT INTO resource_skills (
+    resource_id,
+    skill_name,
+    skill_level
+)
+SELECT resource_id, skill_name, skill_level
+FROM (
+    VALUES
+        ('P-001', 'backend', 3),
+        ('P-001', 'api', 3),
+        ('P-001', 'security', 3),
+        ('P-001', 'postgresql', 3),
+        ('P-002', 'frontend', 3),
+        ('P-002', 'javascript', 3),
+        ('P-002', 'accessibility', 3),
+        ('P-003', 'security', 4),
+        ('P-003', 'testing', 4),
+        ('P-003', 'cloud', 4)
+) AS input(resource_code, skill_name, skill_level)
+JOIN resources r
+    ON r.resource_code = input.resource_code;
+
+INSERT INTO tasks (
+    project_id,
+    task_code,
+    task_name,
+    state,
+    estimated_hours,
+    priority,
+    start_date,
+    end_date
+)
+SELECT
+    project_id,
+    input.task_code,
+    input.task_name,
+    input.state::task_state,
+    input.estimated_hours,
+    input.priority,
+    input.start_date::date,
+    input.end_date::date
+FROM projects p
+CROSS JOIN (
+    VALUES
+        (
+            'T-API',
+            'Secure service implementation',
+            'planned',
+            72.00,
+            1,
+            '2026-10-19',
+            '2026-10-30'
+        ),
+        (
+            'T-WEB',
+            'Accessible public portal',
+            'planned',
+            64.00,
+            2,
+            '2026-10-26',
+            '2026-11-06'
+        ),
+        (
+            'T-SEC',
+            'Security validation',
+            'planned',
+            40.00,
+            1,
+            '2026-11-02',
+            '2026-11-13'
+        )
+) AS input(
+    task_code,
+    task_name,
+    state,
+    estimated_hours,
+    priority,
+    start_date,
+    end_date
+)
+WHERE p.project_code = 'PSDP-2026';
+
+INSERT INTO task_required_skills (
+    task_id,
+    skill_name,
+    minimum_skill_level
+)
+SELECT t.task_id, input.skill_name, input.minimum_skill_level
+FROM tasks t
+JOIN (
+    VALUES
+        ('T-API', 'backend', 3),
+        ('T-API', 'api', 3),
+        ('T-API', 'security', 3),
+        ('T-WEB', 'frontend', 3),
+        ('T-WEB', 'javascript', 3),
+        ('T-WEB', 'accessibility', 3),
+        ('T-SEC', 'security', 4),
+        ('T-SEC', 'testing', 4)
+) AS input(task_code, skill_name, minimum_skill_level)
+    ON input.task_code = t.task_code;
+
+-- The allocation transaction represents a planning decision that must
+-- satisfy task effort, resource capacity, and qualification requirements.
+BEGIN;
+
+INSERT INTO allocations (
+    task_id,
+    resource_id,
+    allocation_start,
+    allocation_end,
+    allocated_hours
+)
+SELECT
+    t.task_id,
+    r.resource_id,
+    t.start_date,
+    t.end_date,
+    72.00
+FROM tasks t
+JOIN resources r
+    ON r.resource_code = 'P-001'
+WHERE t.task_code = 'T-API'
+  AND r.resource_type = 'person'
+  AND NOT EXISTS (
+      SELECT 1
+      FROM allocations a
+      WHERE a.resource_id = r.resource_id
+        AND a.state <> 'released'
+        AND a.allocation_start <= t.end_date
+        AND a.allocation_end >= t.start_date
+  );
+
+INSERT INTO allocations (
+    task_id,
+    resource_id,
+    allocation_start,
+    allocation_end,
+    allocated_hours
+)
+SELECT
+    t.task_id,
+    r.resource_id,
+    t.start_date,
+    t.end_date,
+    64.00
+FROM tasks t
+JOIN resources r
+    ON r.resource_code = 'P-002'
+WHERE t.task_code = 'T-WEB';
+
+INSERT INTO allocations (
+    task_id,
+    resource_id,
+    allocation_start,
+    allocation_end,
+    allocated_hours
+)
+SELECT
+    t.task_id,
+    r.resource_id,
+    t.start_date,
+    t.end_date,
+    40.00
+FROM tasks t
+JOIN resources r
+    ON r.resource_code = 'P-003'
+WHERE t.task_code = 'T-SEC';
+
+COMMIT;
+
+-- Resource utilization is calculated from allocations rather than stored
+-- as a mutable value. This prevents the utilization percentage from becoming
+-- stale when an allocation is released or changed.
+
+CREATE VIEW resource_utilization AS
+SELECT
+    r.resource_id,
+    r.resource_code,
+    r.resource_name,
+    r.weekly_capacity_hours,
+    COALESCE(
+        SUM(
+            CASE
+                WHEN a.state <> 'released'
+                THEN a.allocated_hours
+                ELSE 0
+            END
+        ),
+        0
+    ) AS allocated_hours,
+    ROUND(
+        COALESCE(
+            SUM(
+                CASE
+                    WHEN a.state <> 'released'
+                    THEN a.allocated_hours
+                    ELSE 0
+                END
+            ),
+            0
+        ) / r.weekly_capacity_hours * 100,
+        2
+    ) AS utilization_percent
+FROM resources r
+LEFT JOIN allocations a
+    ON a.resource_id = r.resource_id
+GROUP BY
+    r.resource_id,
+    r.resource_code,
+    r.resource_name,
+    r.weekly_capacity_hours;
+
+SELECT *
+FROM resource_utilization
+WHERE resource_type IS NULL
+   OR TRUE;
+
+-- Find tasks whose required skills have no qualifying active resource.
+SELECT
+    t.task_code,
+    t.task_name,
+    trs.skill_name,
+    trs.minimum_skill_level
+FROM tasks t
+JOIN task_required_skills trs
+    ON trs.task_id = t.task_id
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM resources r
+    JOIN resource_skills rs
+        ON rs.resource_id = r.resource_id
+       AND rs.skill_name = trs.skill_name
+       AND rs.skill_level >= trs.minimum_skill_level
+    WHERE r.resource_type = 'person'
+      AND r.active = TRUE
+);
+
+-- Identify resources whose planned allocation exceeds their stated capacity.
+SELECT
+    r.resource_code,
+    r.resource_name,
+    r.weekly_capacity_hours,
+    SUM(a.allocated_hours) AS allocated_hours
+FROM resources r
+JOIN allocations a
+    ON a.resource_id = r.resource_id
+WHERE a.state <> 'released'
+GROUP BY
+    r.resource_code,
+    r.resource_name,
+    r.weekly_capacity_hours
+HAVING SUM(a.allocated_hours) > r.weekly_capacity_hours;
+
+-- Project cost is derived from resource rates and actual planned allocations.
+SELECT
+    p.project_code,
+    p.project_name,
+    p.budget,
+    COALESCE(
+        SUM(a.allocated_hours * r.hourly_cost),
+        0
+    ) AS planned_resource_cost,
+    p.budget -
+    COALESCE(
+        SUM(a.allocated_hours * r.hourly_cost),
+        0
+    ) AS remaining_budget
+FROM projects p
+LEFT JOIN tasks t
+    ON t.project_id = p.project_id
+LEFT JOIN allocations a
+    ON a.task_id = t.task_id
+   AND a.state <> 'released'
+LEFT JOIN resources r
+    ON r.resource_id = a.resource_id
+GROUP BY
+    p.project_id,
+    p.project_code,
+    p.project_name,
+    p.budget;
+
+-- Detect allocations assigned to resources lacking one or more required skills.
+SELECT DISTINCT
+    a.allocation_id,
+    r.resource_code,
+    r.resource_name,
+    t.task_code,
+    trs.skill_name
+FROM allocations a
+JOIN resources r
+    ON r.resource_id = a.resource_id
+JOIN tasks t
+    ON t.task_id = a.task_id
+JOIN task_required_skills trs
+    ON trs.task_id = t.task_id
+LEFT JOIN resource_skills rs
+    ON rs.resource_id = r.resource_id
+   AND rs.skill_name = trs.skill_name
+   AND rs.skill_level >= trs.minimum_skill_level
+WHERE r.resource_type = 'person'
+  AND rs.resource_id IS NULL;
+
+-- Capacity planning can also account for approved absence periods.
+SELECT
+    r.resource_code,
+    r.resource_name,
+    SUM(
+        CASE
+            WHEN a.allocation_start <= ra.absence_end
+             AND a.allocation_end >= ra.absence_start
+            THEN a.allocated_hours
+            ELSE 0
+        END
+    ) AS overlapping_allocated_hours
+FROM resources r
+JOIN resource_absences ra
+    ON ra.resource_id = r.resource_id
+LEFT JOIN allocations a
+    ON a.resource_id = r.resource_id
+GROUP BY
+    r.resource_code,
+    r.resource_name;
+
+-- A database constraint protects task effort from being silently exceeded
+-- by allocations. The trigger recalculates the task total whenever an
+-- allocation is inserted or changed.
+
+CREATE OR REPLACE FUNCTION enforce_task_effort()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    task_limit NUMERIC(10,2);
+    allocated_total NUMERIC(10,2);
+BEGIN
+    SELECT estimated_hours
+    INTO task_limit
+    FROM tasks
+    WHERE task_id = NEW.task_id;
+
+    SELECT COALESCE(SUM(allocated_hours), 0)
+    INTO allocated_total
+    FROM allocations
+    WHERE task_id = NEW.task_id
+      AND allocation_id <> COALESCE(NEW.allocation_id, -1)
+      AND state <> 'released';
+
+    IF allocated_total + NEW.allocated_hours > task_limit
+       AND NEW.state <> 'released' THEN
+        RAISE EXCEPTION
+            'Task % exceeds estimated effort: allocated %, limit %',
+            NEW.task_id,
+            allocated_total + NEW.allocated_hours,
+            task_limit;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_enforce_task_effort
+BEFORE INSERT OR UPDATE OF task_id, allocated_hours, state
+ON allocations
+FOR EACH ROW
+EXECUTE FUNCTION enforce_task_effort();
+
+-- This statement is intentionally invalid and demonstrates database-level
+-- enforcement. It is wrapped in a savepoint so the rest of the session
+-- remains usable after the expected exception.
+BEGIN;
+
+SAVEPOINT invalid_allocation;
+
+DO $$
+BEGIN
+    BEGIN
+        INSERT INTO allocations (
+            task_id,
+            resource_id,
+            allocation_start,
+            allocation_end,
+            allocated_hours
+        )
+        SELECT
+            t.task_id,
+            r.resource_id,
+            t.start_date,
+            t.end_date,
+            10.00
+        FROM tasks t
+        JOIN resources r
+            ON r.resource_code = 'P-003'
+        WHERE t.task_code = 'T-SEC';
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            RAISE NOTICE
+                'Expected invalid allocation rejected: %',
+                SQLERRM;
+    END;
+END;
+$$;
+
+ROLLBACK TO SAVEPOINT invalid_allocation;
+COMMIT;
+
+-- A final planning query presents work, ownership, effort, and cost together.
+SELECT
+    p.project_code,
+    t.task_code,
+    t.task_name,
+    t.state,
+    r.resource_code,
+    r.resource_name,
+    a.allocated_hours,
+    r.hourly_cost,
+    a.allocated_hours * r.hourly_cost AS allocation_cost
+FROM projects p
+JOIN tasks t
+    ON t.project_id = p.project_id
+JOIN allocations a
+    ON a.task_id = t.task_id
+JOIN resources r
+    ON r.resource_id = a.resource_id
+WHERE a.state <> 'released'
+ORDER BY
+    t.priority,
+    t.start_date,
+    r.resource_name;
